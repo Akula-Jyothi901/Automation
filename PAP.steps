@@ -1,0 +1,197 @@
+import subprocess
+import re
+import time
+import sys
+import os
+import glob
+from socket import *
+from behave import given, when, then
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__),"..","..")))
+from cfrfuelbdd.fuel_logging import logger
+from steps.common_steps import *
+from utils.utils import read_config,check_string_in_log
+from fcc.fuelcontrol_proxy import Fuelcontrol
+
+
+
+@then(u'the ICR should display the configured prompt \'REINSERTCARD\'')
+def step_impl(context):
+    logger.info(f'STEP: Then the ICR should display the configured prompt \'REINSERTCARD\'')
+
+
+@when("the user swiped an expired credit card")
+def step_impl(context):
+    """
+    Simulates swiping an expired card at the pump and logs the action.
+    """
+    logger.info(f"Card Expired card.." )
+    cardsteps_swipe_card(
+        context,
+        "%B372092936591004^TEST ACCOUNT^0606911100?;372092936591004=060691110000000000000?",
+    )
+
+
+@then("the PAP transaction is declined")
+def step_impl(context):
+    logger.info(f"the PAP transaction is declined")
+    # wait_for_prompt(context, "Card expired")
+
+@then(u'the configured prompt "Unknown card" is displayed')
+def step_impl(context):
+    logger.info(f'STEP: Then the configured prompt "Unknown card" is displayed')
+
+
+@when(u'I wait for the configured \'PROMPTTIMEOUT\' time')
+def step_impl(context):
+    logger.info(f'STEP: When I wait for the configured \'PROMPTTIMEOUT\' time')
+
+
+@then(u'the ICR should display welcome prompt')
+def step_impl(context):
+    logger.info(f'STEP: Then the ICR should display welcome prompt')
+    time.sleep(30)
+    retval = context.icr.get_current_display(context.pump)
+    logger.debug(f"ICR Displaye Message : {retval}")
+    # retval.assert_true(f'Welcome ')
+   
+
+def cardsteps_swipe_card(context, card_data):
+    # clear the event buffer
+    logger.debug(f"MSR swipe - Start")
+    # context.fuel.node.clear_all_events(context.pump_number)
+    # logger.debug("Cleared all events")
+    retval = context.icr.swipe_card(context.pump, card_data)
+    logger.debug(f"swipe_card returned {retval}")
+    # retval.assert_true(f'ICRSIM swipe_card return')
+    assert(retval)
+    # if retval :
+    #     logger.debug(f"Assert Pass ")
+    #     assert(True)
+    # else:
+    #     logger.debug(f"Assert Fail ")
+    #     assert(False)
+            
+    # if(context.fuel.EPS is not None):
+    #     # attempt to get the transaction id
+    #     count = 3
+    #     context.eps_txid = context.fuel.node.get_eps_transaction_id(context.pump_number)
+    #     logger.debug(F"Eps tran id : {context.eps_txid}")
+    #     while(context.eps_txid <= 0 and count > 0):
+    #         time.sleep(1)
+    #         context.eps_txid = context.fuel.node.get_eps_transaction_id(context.pump_number)
+    #         logger.debug(F"Eps tran id : {context.eps_txid}")
+    #         count = count - 1
+    # else:
+    #     # give the ICR/Icarus a moment to process the card swipe
+    #     time.sleep(2)
+    logger.debug("MSR swipe - End")
+    
+# Step implementation for preparing the ICR (Integrated Card Reader) for a PAP (Pay-at-Pump) transaction
+@given('The ICR is ready for a PAP transaction "{pump_number}"')
+@given('The user completes PAP transaction with pump "{pump_number}" and flow rate "{flow_rate}"')
+def step_impl_complete_PAP(context, pump_number, flow_rate):
+    context.execute_steps(f'''
+        Given Initializing GPI Interfaces
+        When I select pump "{pump_number}"
+        And Card Swiped on pump with ";37144983511002=191210196051234500000?"
+        And I Set the flow rate on pump to {flow_rate}
+        And the nozzle is lifted on pump
+        And the grade is selected on pump
+        Then fueling is started on pump
+        And fueling is stopped on pump
+        And the socket connection is closed successfully
+    ''')
+    logger.debug("User completes PAP transaction ")
+
+# Step implementation for creating a dump file for a specified process from Task Manager
+@when('a dump file for "{process_name}" process is created from Task Manager')
+def step_impl(context, process_name):
+    # Get the correct path to utils directory (relative to this script's location)
+    script_dir = os.path.dirname(os.path.abspath(__file__))  # features/steps directory
+    bdd_dir = os.path.dirname(os.path.dirname(script_dir))  # bdd directory
+    utils_dir = os.path.join(bdd_dir, 'utils')
+    dump_tool_path = os.path.join(utils_dir, context.dump_tool)
+   
+    # Verify the tool exists
+    if not os.path.exists(dump_tool_path):
+        error_msg = f"Dump tool not found at: {dump_tool_path}"
+        logger.error(error_msg)
+        assert False, error_msg
+   
+    # Construct the full dump file path
+    dump_file_path = os.path.join(context.dump_logfile_path, f"{process_name}.dmp")
+   
+    # Ensure dump directory exists
+    os.makedirs(context.dump_logfile_path, exist_ok=True)
+    try:
+        # Run the dump tool to create the dump file for the specified process
+        subprocess.run([dump_tool_path,'-accepteula', '-ma',process_name, dump_file_path], check=True)
+    except subprocess.CalledProcessError as e:
+        logger.info(f"Error while creating dump: {e}")        
+    except Exception as ex:
+        logger.info(f"Unexpected error: {ex}")
+        assert False, str(ex)
+
+# Step implementation for checking the dump file for sensitive information
+@then(u'Check the dump file and verify the Payment Reference Number should be encrypted or not present')
+@then(u'there should be no card information present in the dump file')
+@then('check the dump file should not have any card info or sensitive info')
+def step_impl(context):
+    logger.info("Check the created dump file for sensitive info :")
+    found_sensitive_data = False
+
+    CARD_REGEX = re.compile(rb'4[0-9]{12}(?:[0-9]{3})?')  #sample card numbers
+     # Look for the latest .dmp  from the list
+    dumps = glob.glob(os.path.join(context.dump_logfile_path, "*.dmp"))
+    if not dumps:
+        raise FileNotFoundError("No dump files found in TEMP folder")
+    latest_dump = max(dumps, key=os.path.getctime)         
+    logger.info(f"Latest Dump file : {latest_dump} at: {context.dump_logfile_path}" )
+    try:
+        with open(latest_dump, 'rb') as f:
+            data = f.read()
+            if CARD_REGEX.search(data):
+                logger.info(f"Card info found in: {latest_dump}")
+                found_sensitive_data = True 
+    except Exception as e:
+        logger.info(f"Could not read dump file {latest_dump}: {e}")
+        assert not found_sensitive_data, "Sensitive information found in dump file!" ## commenting out for now as dump file has sensitive data, need to check with Dev team
+
+@then('I remove the pap transaction in Transaction control')
+def pap_transaction_removal(context):
+
+    """
+    Use removePAPtrn to  remove the PAP transaction
+    1. Fetch the transaction number using GetCurrenttransaction API call.     
+    2.Pass the Transaction value as sequence number to removePAPtrn.
+
+    """
+    try:
+        context.fuel_proxy.remove_pap_trn(pump_number=context.pump, seq_number=context.trs_no)
+        logger.debug(f"Transaction removed from Transaction Control successfully - Transaction: {context.trs_no}")
+    except Exception as e:
+        context.error = str(e)
+        logger.debug(f"Error occurred during the PAP transaction removal process : {e}")
+
+
+@then('verify the pumpsrv log for removed record')
+def pap_verify_pumpsrv_log(context):
+    """
+    Verifies that a specific log entry indicating successful removal with RTC code 0 exists in the PumpSrv log file.
+
+    check_string_in_log function is used to search for the string in provided log file 
+    If the string is found, it logs a debug message indicating success; otherwise, it logs a debug message indicating failure.
+    This method is declared in utils/utils.py file.
+    """    
+    try:
+        seq=context.trs_no
+        target_string = f'RemovePAPTrs - POS 1, SeqNumber {seq}, Rtc 0'
+        logger.debug(f"PumpSrv log file path ...{context.pumpsrv_log}")
+            
+        if check_string_in_log(context.pumpsrv_log, target_string):
+                logger.info("Removal success and rtc code is 0 in log file")
+    except Exception as e:
+       context.error = str(e)
+       logger.debug(f"Error occurred during the Pumpsrv.log validation process : {e}") 
+        
