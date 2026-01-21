@@ -1,0 +1,254 @@
+import sys
+import os
+from win32com.client import Dispatch
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__),"..","..")))
+from cfrfuelbdd.fuel_logging import logger
+from enums.pump import *
+from utils.status_maps import PUMP_STATUS_MAP, TRS_STATUS_MAP
+
+class Fuelcontrol:
+    def __init__(self):
+        self.GPI = Dispatch("PumpSrv.GPI.1")
+        self.GPI.InitInterface(GPIInit.pos_number.value, GPIInit.version.value)
+        self.Ctrl = Dispatch("PumpSrv.Ctrl.1")
+        
+    def get_postpay_unpaid_trs_list(self, pump_number, trs_data, record_count, query_type=QueryType.UNPAID_PAK_BY_PUMP):
+        """
+        Fetch all unpaid postpay transactions on the given pump and return a list of TRS numbers.
+        """
+        return self.GPI.GetAllTrsQuery2(pump_number, trs_data, record_count, query_type)
+
+    def set_trs_state2(self, pump_number, trs_number, state, flag=0):
+        """
+        Wrapper to set the state of a transaction (TRS).
+        """
+        return self.GPI.SetTrsState2(pump_number, trs_number, state, flag)
+    
+    def set_trs_state(self, pump_number, trs_number, state):
+        """
+        Wrapper to set the state of a transaction (TRS).
+        """
+        return self.GPI.SetTrsState(pump_number, trs_number, state)
+
+    def set_sale_grade_price_change(
+        self,
+        pump_number: int,
+        grade: int,
+        new_PPG_amount: int,
+        mode: PriceMode = PriceMode.SELF,
+        level: PumpSetting = PumpSetting.CASH,
+        flag: PriceFlag = PriceFlag.DEFAULT
+    ):
+        """
+        Set a new price for the specified grade on the specified pump.
+        """
+        return self.Ctrl.SetGradePrice(pump_number, 1, grade, mode.value, level.value, new_PPG_amount, "",flag.value) 
+  
+    def remove_pap_trn(self, pump_number, seq_number):
+        """ Remove a PAP transaction using the sequence number.
+        Args:
+            pump_number (int): The pump number from which to remove the transaction.
+            seq_number (int): The sequence number of the transaction to be removed. 
+            
+        """
+        self.GPI.RemovePAPTrs(pump_number, seq_number)
+
+    def get_pap_trn(self,pump_number):
+        """ Get a PAP transaction for the specified pump."""
+        return self.GPI.GetPAPTrs(pump_number)
+
+    def remove_prepaid_trn(self, pump_number, seq_number):
+        """ Remove a prepaid transaction using the sequence number.
+        Args:
+            pump_number (int): The pump number from which to remove the transaction.
+            seq_number (int): The sequence number of the transaction to be removed. 
+        """
+        return self.GPI.RemovePrePaidTrs(pump_number, seq_number)
+       
+    def authorize_and_limit(
+        self,
+        pump_number: int,
+        level: PumpSetting,
+        grade_price: PumpSetting,
+        amount: int,
+        volume: int,
+        flag: MaxValue,
+        sync: PumpSetting
+    ):
+        """
+        Authorize and limit a transaction on the specified pump.
+        """
+        return self.GPI.AuthorizeAndLimit(
+            pump_number, level, grade_price, amount, volume, flag, sync.value    
+        )    
+     
+    
+    def lock_unlock_pump(self, pump, lockValue: MP_Lock, flag=0):
+        """
+        Locks or UnLocks the pump basing the lock value parameter.
+        """
+        return self.GPI.LockPump(pump, lockValue.value, flag)
+        
+
+    def get_pump_status(self,pump:int) -> str:
+        """
+        Retrieves and parses the status of the specified pump.
+        Args:pump (int): The pump number to query.
+        Returns: str: The human-readable status description of the pump, as mapped in PUMP_STATUS_MAP.
+        """   
+        status_str = self.GPI.GetPumpStatus(pump)
+        logger.debug(f"Status on Pump -status_string : {status_str}")  
+        # Example return string - # retval = (0, '  1  3  0  4  0    0    0    0\x00\x00')
+        # Extract the status code (e.g., the 4th value in the string)       
+        parsed = parse_pump_status(status_str[1])
+        logger.debug(f"parsed Pump status : {parsed}")
+        desc = get_pumpStatus_description(parsed)
+        logger.debug(f"Pump status : {desc}")
+        return desc
+    
+    def get_prepaid_trs(self, pump, trs_no, arg1=1, arg2=" "):
+        unparse_str = self.GPI.GetPrePaidTrs(pump, trs_no, arg1, arg2)
+        logger.debug(f"Get Prepaid Trs API status: {unparse_str}")
+        return unparse_str
+
+    def get_pak_trs(self, pump, trs_no, arg1=1, arg2=" "):
+        unparse_str = self.GPI.GetPAKTrs(pump, trs_no, arg1, arg2)
+        logger.debug(f"Get PAK Trs API status: {unparse_str}")
+        return unparse_str
+    
+    def authorize_pump(
+        self,
+        pump_number: int,
+        level: PumpSetting,
+        grade_price: PumpSetting,
+        amount: int,
+        volume: int,
+        flag: MaxValue,
+        sync: PumpSetting
+    ):
+        """
+        Authorize a pump for POST pay and PAK transaction on the specified pump.
+        """
+        return self.GPI.AuthorizePump3(
+            pump_number, level, grade_price, amount, volume, flag, sync.value
+        )
+
+    def get_current_transaction_number(self, pump_number: int):
+        """Fetch the latest Transaction number from the given pump"""
+        return self.GPI.GetCurrentTransactionNumber(pump_number)
+    
+    def get_pak_trs_volume_value(self, pump, trs_no, arg1=1, arg2=" "):    
+        unparse_str = self.GPI.GetPAKTrs(pump, trs_no, arg1, arg2)
+        logger.debug(f"Get PAK Trs API status:{unparse_str}")
+        parsed_value = parse_gpi_trs_value(unparse_str)        
+        parsed_volume = parse_gpi_trs_volume(unparse_str)
+        return parsed_volume, parsed_value
+
+    def get_current_shift(self, PROCESS_GET_SHIFT_GPI):
+        """
+        Fetch the current shift ID
+        """
+        return self.GPI.GetProcess(PROCESS_GET_SHIFT_GPI)
+
+    def set_new_shift(self, DayOfWeek, ShiftNumber, ShiftFlags, StartTime):
+        """
+        Perform EOD and set the new shift ID
+        """
+        return self.Ctrl.SetShift(DayOfWeek, ShiftNumber, ShiftFlags, StartTime)      
+    
+    def get_fuel_controller_state(self, pump_number: int) -> str:
+        """
+        Get the current fuel controller state by mapping pump status
+        """
+        pump_status = self.get_pump_status(pump_number)
+        return PUMP_STATUS_TO_FUEL_STATE.get(pump_status, FuelControllerState.UNKNOWN.value)
+   
+
+#internal functions to parse pump status and get description   
+# Utility functions (add to your steps file)
+
+def parse_pump_status(status_str: str) -> dict:
+    """
+    # Parses the raw pump status string into its component fields.
+    # Args:
+    #     status_str (str): The raw status string returned from the pump controller.
+    # Returns:
+    #     dict: A dictionary containing the parsed pump number, mode, lock, and status code.
+    """
+    PUMP_STATUS_FIELD_COUNT = 4
+    fields = status_str.strip().replace('\x00', '').split()    
+    if len(fields) < PUMP_STATUS_FIELD_COUNT:
+        logger.error(f"Invalid pump status string: {status_str}")
+        return None
+    return {
+        "pump_number": int(fields[0]),
+        "mode": int(fields[1]),
+        "lock": int(fields[2]),
+        "status": int(fields[3]),
+    }   
+
+def get_pumpStatus_description(parsed_status):
+    """
+    Maps the parsed pump status code to a human-readable description.
+    Args: parsed_status (dict): The parsed pump status dictionary.
+    Returns: str: The status description from PUMP_STATUS_MAP, or 'Unknown' if not found.
+    """
+    return PUMP_STATUS_MAP.get(parsed_status["status"], "Unknown")
+
+def parse_gpi_trs_field(unparsed_str, field_index: int, min_fields: int = 2, as_dict: bool = False, dict_key: str = "status"):
+    """
+    Parse a specific field from a GPI (General Purpose Input) transaction string.
+    Args:
+        unparsed_str: A list or tuple containing transaction data, where the second element
+                     is expected to be a string containing space-separated fields.
+        field_index (int): The zero-based index of the field to extract from the parsed string.
+        min_fields (int, optional): Minimum number of fields required in the parsed string. 
+                                   Defaults to 2.
+        as_dict (bool, optional): If True, returns the value wrapped in a dictionary. 
+                                 Defaults to False.
+        dict_key (str, optional): The key to use when returning as dictionary. 
+                                 Defaults to "status".
+    """
+    if not isinstance(unparsed_str, (list, tuple)) or len(unparsed_str) < 2:
+        logger.error(f"Invalid GPI transaction input: {unparsed_str}")
+        return None
+
+    fields = unparsed_str[1].strip().replace('\x00', '').split()
+    if len(fields) < min_fields or field_index >= len(fields):
+        logger.error(f"Invalid GPI transaction field string: {unparsed_str[1]}")
+        return None
+    value = int(fields[field_index])
+    return {dict_key: value} if as_dict else value
+
+
+def get_trs_status(unparsed_str):
+    """Get transaction status from unparsed GPI string."""
+    return parse_gpi_trs_status(unparsed_str)
+
+def get_trs_status_description(unparsed_str):
+    """Get human-readable transaction status description."""
+    parsed = parse_gpi_trs_status(unparsed_str)
+    if not parsed:
+        return "Unknown"
+    return TRS_STATUS_MAP.get(parsed["status"], "Unknown")
+
+def get_trs_value(unparsed_str):
+    """Get transaction value from unparsed GPI string."""
+    return parse_gpi_trs_value(unparsed_str)
+
+def get_trs_volume(unparsed_str):
+    """Get transaction volume from unparsed GPI string."""
+    return parse_gpi_trs_volume(unparsed_str)
+
+def parse_gpi_trs_value(unparsed_str):
+    """Parse transaction value (field 5) from GPI string."""
+    return parse_gpi_trs_field(unparsed_str, field_index=5)
+
+def parse_gpi_trs_volume(unparsed_str):
+    """Parse transaction volume (field 4) from GPI string."""
+    return parse_gpi_trs_field(unparsed_str, field_index=4)
+
+def parse_gpi_trs_status(unparsed_str):
+    """Parse transaction status (field 1) from GPI string as dict."""
+    return parse_gpi_trs_field(unparsed_str, field_index=1, as_dict=True, dict_key="status")
